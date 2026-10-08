@@ -18,7 +18,8 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:category="android.intent.category.LAUNCHER" />
+                <!-- Corrected attribute from android:category to android:name -->
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
