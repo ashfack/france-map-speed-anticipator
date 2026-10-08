@@ -24,10 +24,15 @@ class RoadAlertService : Service(), TextToSpeech.OnInitListener {
 
     private var isTtsReady = false
     private var lastAnnouncedSpeed: Int? = null
+    private var pendingSpeed: Int? = null
+    private var pendingSpeedUpdates = 0
 
     companion object {
         private const val CHANNEL_ID = "road_alert_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val MIN_SPEED_FOR_BEARING_METERS_PER_SECOND = 2.5f
+        private const val MAX_BEARING_ACCURACY_DEGREES = 45f
+        private const val REQUIRED_CONSISTENT_UPDATES = 2
     }
 
     override fun onCreate() {
@@ -65,18 +70,37 @@ class RoadAlertService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun onLocationUpdated(location: Location) {
-        val lat = location.latitude
-        val lon = location.longitude
+        val bearing = location.takeIf {
+            it.hasBearing() &&
+                it.speed >= MIN_SPEED_FOR_BEARING_METERS_PER_SECOND &&
+                (!it.hasBearingAccuracy() || it.bearingAccuracyDegrees <= MAX_BEARING_ACCURACY_DEGREES)
+        }?.bearing
 
-        // 1. Interrogation de la base SQLite locale
-        val speedLimit = spatialEngine.getSpeedLimitAt(lat, lon)
+        val speedLimit = spatialEngine.getSpeedLimitAt(
+            location.latitude,
+            location.longitude,
+            bearing
+        )
 
-        // 2. Annonce vocale si changement de limitation
-        if (speedLimit != null && speedLimit != lastAnnouncedSpeed) {
+        if (speedLimit == null || speedLimit == lastAnnouncedSpeed) {
+            pendingSpeed = null
+            pendingSpeedUpdates = 0
+            return
+        }
+
+        if (speedLimit == pendingSpeed) {
+            pendingSpeedUpdates++
+        } else {
+            pendingSpeed = speedLimit
+            pendingSpeedUpdates = 1
+        }
+
+        if (pendingSpeedUpdates >= REQUIRED_CONSISTENT_UPDATES) {
             speak("Attention, limitation de vitesse à $speedLimit kilomètres heure")
             lastAnnouncedSpeed = speedLimit
+            pendingSpeed = null
+            pendingSpeedUpdates = 0
 
-            // Mise à jour de la notification
             val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify(
                 NOTIFICATION_ID,
