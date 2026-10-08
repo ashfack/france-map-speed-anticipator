@@ -19,23 +19,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Télécharge automatiquement le composant Gradle Wrapper manquant
-      - name: Download Gradle Wrapper JAR
-        run: |
-          mkdir -p gradle/wrapper
-          curl -sJLO https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradle/wrapper/gradle-wrapper.jar
-          mv gradle-wrapper.jar gradle/wrapper/
+      # Utilisation de l'action officielle Gradle (plus besoin de gradlew local !)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.2'
 
-      # Fix Windows CRLF line endings to Unix LF line endings
-      - name: Fix gradlew line endings
-        run: sed -i 's/\r$//' gradlew
-        
-      # Make sure the wrapper is executable
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Build with Gradle
-        run: ./gradlew assembleDebug --no-daemon
+      # On utilise directement la commande "gradle" globale
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
