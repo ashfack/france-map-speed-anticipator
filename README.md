@@ -2,8 +2,9 @@
 This is an Android app that monitors the vehicle's GPS position and announces detected speed limits.
 
 The local OpenStreetMap database contains roads with explicit speed limits. The app uses the GPS bearing
-while the vehicle is moving and selects a nearby road segment whose geometry and direction match that
-bearing. A limit must be detected on two consecutive location updates before it is announced.
+while the vehicle is moving to match the current road segment, then follows connected OSM segments in
+their permitted direction to find the next mapped speed-limit change. A limit change must be detected
+consistently on two location updates before it is announced with an approximate distance.
 
 The bundled database can be regenerated from a Geofabrik PBF extract. Install `pyosmium`, then run:
 
@@ -29,5 +30,18 @@ and only uses it above 2.5 m/s (about 9 km/h); a measured bearing accuracy worse
 rejected.
 
 Segment matching is more precise than way bounding boxes, but is not full route matching: nearby parallel
-roads with similar directions can still be ambiguous, and each OSM way contributes its explicit
-`maxspeed` uniformly across all of its segments.
+roads with similar directions can still be ambiguous. At ambiguous intersections prediction stops rather
+than guessing a branch. The traversal assumes the most directionally continuous path; it cannot know a
+future turn choice. Each OSM way contributes its explicit `maxspeed` uniformly across all of its segments.
+
+To simulate a straight GPS drive against the bundled database, provide the starting coordinates, compass
+bearing, speed, and simulated distance:
+
+```sh
+python scripts/simulate_route.py 49.0326752 2.3522977 --bearing 0 --speed-kmh 50 \
+  --distance-meters 1000 --step-meters 25
+```
+
+The simulator follows the same connected-segment and speed-change logic as the Android predictor. A
+straight-line replay is useful for diagnostics but does not substitute for a GPX replay on the actual
+route, especially where roads curve or branch.

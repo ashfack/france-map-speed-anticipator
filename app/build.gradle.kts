@@ -29,4 +29,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.example.roadalert.spatial.OsmSpatialEngine
 import com.google.android.gms.location.*
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class RoadAlertService : Service(), TextToSpeech.OnInitListener {
 
@@ -23,9 +24,10 @@ class RoadAlertService : Service(), TextToSpeech.OnInitListener {
     private lateinit var spatialEngine: OsmSpatialEngine
 
     private var isTtsReady = false
-    private var lastAnnouncedSpeed: Int? = null
-    private var pendingSpeed: Int? = null
-    private var pendingSpeedUpdates = 0
+    private var lastAnnouncedCurrentSpeed: Int? = null
+    private var lastAnnouncedTargetSpeed: Int? = null
+    private var pendingAnnouncement: String? = null
+    private var pendingAnnouncementUpdates = 0
 
     companion object {
         private const val CHANNEL_ID = "road_alert_channel"
@@ -76,37 +78,104 @@ class RoadAlertService : Service(), TextToSpeech.OnInitListener {
                 (!it.hasBearingAccuracy() || it.bearingAccuracyDegrees <= MAX_BEARING_ACCURACY_DEGREES)
         }?.bearing
 
-        val speedLimit = spatialEngine.getSpeedLimitAt(
+        val prediction = spatialEngine.getSpeedLimitPrediction(
             location.latitude,
             location.longitude,
             bearing
         )
 
-        if (speedLimit == null || speedLimit == lastAnnouncedSpeed) {
-            pendingSpeed = null
-            pendingSpeedUpdates = 0
+        if (prediction == null) {
+            resetPendingAnnouncement()
             return
         }
 
-        if (speedLimit == pendingSpeed) {
-            pendingSpeedUpdates++
+        if (prediction.currentSpeedLimit == lastAnnouncedTargetSpeed) {
+            lastAnnouncedTargetSpeed = null
+            lastAnnouncedCurrentSpeed = prediction.currentSpeedLimit
+        }
+
+        val nextSpeed = prediction.nextSpeedLimit
+        val distance = prediction.distanceToNextSpeedLimitMeters
+        if (
+            prediction.currentSpeedLimit != lastAnnouncedCurrentSpeed &&
+            prediction.currentSpeedLimit != lastAnnouncedTargetSpeed &&
+            pendingAnnouncement == "next:${prediction.currentSpeedLimit}"
+        ) {
+            val currentMessage =
+                "La limitation passe à ${prediction.currentSpeedLimit} kilomètres heure"
+            speak(currentMessage)
+            lastAnnouncedCurrentSpeed = prediction.currentSpeedLimit
+            resetPendingAnnouncement()
+            notifyLimit("Limitation actuelle : ${prediction.currentSpeedLimit} km/h")
+            return
+        }
+
+        val upcomingAnnouncement = if (
+            nextSpeed != null &&
+            distance != null &&
+            distance >= 0.0 &&
+            nextSpeed != prediction.currentSpeedLimit &&
+            nextSpeed != lastAnnouncedTargetSpeed
+        ) {
+            if (distance < 10.0) {
+                "Attention, la limitation va passer à $nextSpeed kilomètres heure"
+            } else {
+                val roundedDistance = (distance / 10.0).roundToInt() * 10
+                "Dans environ $roundedDistance mètres, la limitation passera à $nextSpeed kilomètres heure"
+            }
         } else {
-            pendingSpeed = speedLimit
-            pendingSpeedUpdates = 1
+            null
         }
 
-        if (pendingSpeedUpdates >= REQUIRED_CONSISTENT_UPDATES) {
-            speak("Attention, limitation de vitesse à $speedLimit kilomètres heure")
-            lastAnnouncedSpeed = speedLimit
-            pendingSpeed = null
-            pendingSpeedUpdates = 0
-
-            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.notify(
-                NOTIFICATION_ID,
-                createNotification("Limitation détectée : $speedLimit km/h")
-            )
+        val currentLimitChanged = lastAnnouncedCurrentSpeed != null &&
+            prediction.currentSpeedLimit != lastAnnouncedCurrentSpeed &&
+            prediction.currentSpeedLimit != lastAnnouncedTargetSpeed
+        val announcementKey = when {
+            currentLimitChanged -> "current:${prediction.currentSpeedLimit}"
+            upcomingAnnouncement != null -> "next:$nextSpeed"
+            prediction.currentSpeedLimit != lastAnnouncedCurrentSpeed &&
+                prediction.currentSpeedLimit != lastAnnouncedTargetSpeed ->
+                "current:${prediction.currentSpeedLimit}"
+            else -> null
         }
+
+        if (announcementKey == null) {
+            resetPendingAnnouncement()
+            return
+        }
+
+        if (announcementKey == pendingAnnouncement) {
+            pendingAnnouncementUpdates++
+        } else {
+            pendingAnnouncement = announcementKey
+            pendingAnnouncementUpdates = 1
+        }
+
+        if (pendingAnnouncementUpdates < REQUIRED_CONSISTENT_UPDATES) return
+
+        if (announcementKey.startsWith("next:") && upcomingAnnouncement != null && nextSpeed != null) {
+            speak(upcomingAnnouncement)
+            lastAnnouncedTargetSpeed = nextSpeed
+            lastAnnouncedCurrentSpeed = prediction.currentSpeedLimit
+            notifyLimit(upcomingAnnouncement)
+        } else {
+            val currentMessage =
+                "Limitation de vitesse à ${prediction.currentSpeedLimit} kilomètres heure"
+            speak(currentMessage)
+            lastAnnouncedCurrentSpeed = prediction.currentSpeedLimit
+            notifyLimit("Limitation actuelle : ${prediction.currentSpeedLimit} km/h")
+        }
+        resetPendingAnnouncement()
+    }
+
+    private fun resetPendingAnnouncement() {
+        pendingAnnouncement = null
+        pendingAnnouncementUpdates = 0
+    }
+
+    private fun notifyLimit(content: String) {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, createNotification(content))
     }
 
     private fun speak(text: String) {
