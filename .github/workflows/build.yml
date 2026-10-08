@@ -26,10 +26,15 @@ jobs:
           curl -sJLO https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradle/wrapper/gradle-wrapper.jar
           mv gradle-wrapper.jar gradle/wrapper/
 
-      - name: Grant execute permission for gradlew
+      # Fix Windows CRLF line endings to Unix LF line endings
+      - name: Fix gradlew line endings
+        run: sed -i 's/\r$//' gradlew
+        
+      # Make sure the wrapper is executable
+      - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
+      - name: Build with Gradle
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Upload Debug APK
