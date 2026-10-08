@@ -17,6 +17,7 @@ class RouteSimulationTests(unittest.TestCase):
             """
             CREATE TABLE segments (
                 segment_id INTEGER PRIMARY KEY,
+                way_id INTEGER NOT NULL,
                 maxspeed INTEGER NOT NULL,
                 oneway INTEGER NOT NULL,
                 start_lat_e6 INTEGER NOT NULL,
@@ -32,7 +33,7 @@ class RouteSimulationTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def add_segment(self, segment_id, speed, start, end, oneway=0):
+    def add_segment(self, segment_id, speed, start, end, oneway=0, way_id=None):
         start_lat, start_lon = start
         end_lat, end_lon = end
         start_lat_e6 = round(start_lat * 1_000_000)
@@ -40,9 +41,10 @@ class RouteSimulationTests(unittest.TestCase):
         end_lat_e6 = round(end_lat * 1_000_000)
         end_lon_e6 = round(end_lon * 1_000_000)
         self.db.execute(
-            "INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 segment_id,
+                segment_id if way_id is None else way_id,
                 speed,
                 oneway,
                 start_lat_e6,
@@ -86,7 +88,15 @@ class RouteSimulationTests(unittest.TestCase):
 
         prediction = simulator.predict(self.db, 0, 0.00025, 90)
 
-        self.assertEqual(prediction, (50, None, None))
+        self.assertEqual(prediction[:3], (50, None, None))
+
+    def test_requires_confirmation_for_equally_plausible_parallel_ways(self):
+        self.add_segment(1, 50, (0, 0), (0, 0.002), way_id=10)
+        self.add_segment(2, 50, (0.00001, 0), (0.00001, 0.002), way_id=20)
+
+        prediction = simulator.predict(self.db, 0.000005, 0.00025, 90)
+
+        self.assertTrue(prediction[3])
 
     def test_stops_prediction_at_an_ambiguous_intersection(self):
         self.add_segment(1, 50, (0, 0), (0, 0.001))
@@ -95,22 +105,56 @@ class RouteSimulationTests(unittest.TestCase):
 
         prediction = simulator.predict(self.db, 0, 0.00025, 90)
 
-        self.assertEqual(prediction, (50, None, None))
+        self.assertEqual(prediction[:3], (50, None, None))
 
-    def test_announcement_waits_for_two_consistent_predictions(self):
+    def test_confident_announcement_is_immediate_and_buffered(self):
         state = {
             "current_speed": None,
             "target_speed": None,
             "pending": None,
             "pending_count": 0,
+            "announced": {},
+            "now_ms": 0,
         }
 
-        first = simulator.update_announcement((50, 30, 32.0), state)
-        second = simulator.update_announcement((50, 30, 7.0), state)
+        first = simulator.update_announcement((50, 30, 32.0, False), state)
+        state["now_ms"] = 1_000
+        second = simulator.update_announcement((50, 30, 7.0, False), state)
+
+        self.assertEqual(first, "Dans environ 30 mètres, la limitation passera à 30 kilomètres heure")
+        self.assertIsNone(second)
+
+    def test_uncertain_announcement_requires_two_consistent_updates(self):
+        state = {
+            "current_speed": None,
+            "target_speed": None,
+            "pending": None,
+            "pending_count": 0,
+            "announced": {},
+            "now_ms": 0,
+        }
+
+        first = simulator.update_announcement((50, 30, 120.0, True), state)
+        state["now_ms"] = 1_000
+        second = simulator.update_announcement((50, 30, 120.0, True), state)
 
         self.assertIsNone(first)
+        self.assertEqual(second, "Dans environ 120 mètres, la limitation passera à 30 kilomètres heure")
+
+    def test_nearby_transition_uses_immediate_warning(self):
+        state = {
+            "current_speed": None,
+            "target_speed": None,
+            "pending": None,
+            "pending_count": 0,
+            "announced": {},
+            "now_ms": 0,
+        }
+
+        announcement = simulator.update_announcement((50, 30, 7.0, False), state)
+
         self.assertEqual(
-            second,
+            announcement,
             "Attention, la limitation va passer à 30 kilomètres heure",
         )
 

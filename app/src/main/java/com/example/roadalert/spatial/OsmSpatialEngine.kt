@@ -97,7 +97,7 @@ class OsmSpatialEngine(private val context: Context) {
         val longitudeScaleFactor = abs(cos(Math.toRadians(lat))).coerceAtLeast(0.01)
         val longitudeDelta = latitudeDelta / longitudeScaleFactor
         val query = """
-            SELECT s.segment_id, s.maxspeed, s.start_lat_e6, s.start_lon_e6,
+            SELECT s.segment_id, s.way_id, s.maxspeed, s.start_lat_e6, s.start_lon_e6,
                    s.end_lat_e6, s.end_lon_e6, s.oneway
             FROM segment_index AS i
             JOIN segments AS s ON s.segment_id = i.segment_id
@@ -117,6 +117,7 @@ class OsmSpatialEngine(private val context: Context) {
         val candidates = mutableListOf<RoadSegment>()
         cursor.use {
             val idIndex = it.getColumnIndexOrThrow("segment_id")
+            val wayIdIndex = it.getColumnIndexOrThrow("way_id")
             val speedIndex = it.getColumnIndexOrThrow("maxspeed")
             val startLatIndex = it.getColumnIndexOrThrow("start_lat_e6")
             val startLonIndex = it.getColumnIndexOrThrow("start_lon_e6")
@@ -126,6 +127,7 @@ class OsmSpatialEngine(private val context: Context) {
             while (it.moveToNext()) {
                 candidates += RoadSegment(
                     id = it.getInt(idIndex),
+                    wayId = it.getLong(wayIdIndex),
                     speedLimit = it.getInt(speedIndex),
                     oneway = it.getInt(onewayIndex),
                     startLatitudeE6 = it.getInt(startLatIndex),

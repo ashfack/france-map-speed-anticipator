@@ -13,9 +13,13 @@ SEGMENT_SEARCH_RADIUS_METERS = 1_550.0
 MAX_ROAD_DISTANCE_METERS = 35.0
 MAX_PREDICTION_DISTANCE_METERS = 1_500.0
 MIN_HEADING_ALIGNMENT = math.cos(math.radians(50.0))
+HIGH_CONFIDENCE_MIN_ALIGNMENT = math.cos(math.radians(25.0))
+HIGH_CONFIDENCE_MAX_ROAD_DISTANCE_METERS = 12.0
+AMBIGUOUS_MATCH_SCORE_GAP_METERS = 4.0
 MIN_TURN_ALIGNMENT = -0.5
 HEADING_SCORE_WEIGHT_METERS = 20.0
 AMBIGUOUS_BRANCH_ALIGNMENT_GAP = 0.08
+DUPLICATE_BUFFER_MILLIS = 30_000
 
 
 def predict(connection, latitude, longitude, bearing):
@@ -25,7 +29,8 @@ def predict(connection, latitude, longitude, bearing):
     rows = connection.execute(
         """
         SELECT s.segment_id, s.maxspeed, s.oneway,
-               s.start_lat_e6, s.start_lon_e6, s.end_lat_e6, s.end_lon_e6
+               s.start_lat_e6, s.start_lon_e6, s.end_lat_e6, s.end_lon_e6,
+               s.way_id
         FROM segment_index AS i
         JOIN segments AS s ON s.segment_id = i.segment_id
         WHERE i.min_lat <= ? AND i.max_lat >= ?
@@ -40,12 +45,12 @@ def predict(connection, latitude, longitude, bearing):
     ).fetchall()
 
     edges = []
-    for segment_id, speed, oneway, start_lat, start_lon, end_lat, end_lon in rows:
-        segment = (segment_id, speed, start_lat, start_lon, end_lat, end_lon)
+    for segment_id, speed, oneway, start_lat, start_lon, end_lat, end_lon, way_id in rows:
+        segment = (segment_id, speed, start_lat, start_lon, end_lat, end_lon, way_id)
         if oneway != -1:
             edges.append(segment)
         if oneway != 1:
-            edges.append((segment_id, speed, end_lat, end_lon, start_lat, start_lon))
+            edges.append((segment_id, speed, end_lat, end_lon, start_lat, start_lon, way_id))
     adjacency = {}
     for edge in edges:
         adjacency.setdefault((edge[2], edge[3]), []).append(edge)
@@ -85,17 +90,34 @@ def predict(connection, latitude, longitude, bearing):
                 distance_from_road + (1.0 - alignment) * HEADING_SCORE_WEIGHT_METERS,
                 edge,
                 (1.0 - projection) * length,
+                distance_from_road,
+                alignment,
             )
         )
 
     if not matches:
         return None
-    _, current, distance_to_end = min(matches, key=lambda match: match[0])
+    matches.sort(key=lambda match: match[0])
+    _, current, distance_to_end, road_distance, alignment = matches[0]
+    requires_confirmation = (
+        road_distance > HIGH_CONFIDENCE_MAX_ROAD_DISTANCE_METERS
+        or alignment < HIGH_CONFIDENCE_MIN_ALIGNMENT
+    )
+    competing_match = next(
+        (
+            match
+            for match in matches[1:]
+            if match[1][6] != current[6]
+            and match[0] - matches[0][0] <= AMBIGUOUS_MATCH_SCORE_GAP_METERS
+        ),
+        None,
+    )
+    requires_confirmation = requires_confirmation or competing_match is not None
     distance_along_route = distance_to_end
     previous = current
     visited = {(previous[0], (previous[2], previous[3]))}
     if distance_along_route >= MAX_PREDICTION_DISTANCE_METERS:
-        return current[1], None, None
+        return current[1], None, None, requires_confirmation
 
     while distance_along_route < MAX_PREDICTION_DISTANCE_METERS:
         successors = [
@@ -107,9 +129,9 @@ def predict(connection, latitude, longitude, bearing):
             previous, successors, latitude, longitude, longitude_scale
         )
         if next_edge is None:
-            return current[1], None, None
+            return current[1], None, None, requires_confirmation
         if next_edge[1] != current[1]:
-            return current[1], next_edge[1], distance_along_route
+            return current[1], next_edge[1], distance_along_route, requires_confirmation
 
         start = point_meters(next_edge[2], next_edge[3], latitude, longitude, longitude_scale)
         end = point_meters(next_edge[4], next_edge[5], latitude, longitude, longitude_scale)
@@ -117,7 +139,7 @@ def predict(connection, latitude, longitude, bearing):
         previous = next_edge
         visited.add((previous[0], (previous[2], previous[3])))
 
-    return current[1], None, None
+    return current[1], None, None, requires_confirmation
 
 
 def point_meters(latitude_e6, longitude_e6, origin_latitude, origin_longitude, longitude_scale):
@@ -184,20 +206,13 @@ def update_announcement(prediction, state):
         state["pending_count"] = 0
         return None
 
-    current_speed, next_speed, distance = prediction
+    current_speed, next_speed, distance, uncertain = prediction
     if current_speed == state["target_speed"]:
         state["target_speed"] = None
         state["current_speed"] = current_speed
-
-    if (
-        current_speed != state["current_speed"]
-        and current_speed != state["target_speed"]
-        and state["pending"] == f"next:{current_speed}"
-    ):
-        state["current_speed"] = current_speed
         state["pending"] = None
         state["pending_count"] = 0
-        return f"La limitation passe à {current_speed} kilomètres heure"
+        return None
 
     upcoming = None
     if (
@@ -207,7 +222,7 @@ def update_announcement(prediction, state):
         and next_speed != current_speed
         and next_speed != state["target_speed"]
     ):
-        if distance < 10:
+        if distance <= 25:
             upcoming = f"Attention, la limitation va passer à {next_speed} kilomètres heure"
         else:
             rounded_distance = math.floor(distance / 10 + 0.5) * 10
@@ -216,19 +231,21 @@ def update_announcement(prediction, state):
                 f"à {next_speed} kilomètres heure"
             )
 
-    current_changed = (
-        state["current_speed"] is not None
-        and current_speed != state["current_speed"]
-        and current_speed != state["target_speed"]
-    )
-    if current_changed:
-        key = f"current:{current_speed}"
+    current_changed = state["current_speed"] is not None and current_speed != state["current_speed"]
+    if current_changed and current_speed != state["target_speed"]:
+        key = f"current:{state['current_speed']}->{current_speed}"
     elif upcoming is not None:
-        key = f"next:{next_speed}"
-    elif current_speed != state["current_speed"] and current_speed != state["target_speed"]:
-        key = f"current:{current_speed}"
+        key = f"transition:{current_speed}->{next_speed}"
+    elif state["current_speed"] is None:
+        key = f"current:unknown->{current_speed}"
     else:
         key = None
+
+    last_announced = state["announced"].get(key) if key is not None else None
+    if last_announced is not None and state["now_ms"] - last_announced < DUPLICATE_BUFFER_MILLIS:
+        state["pending"] = None
+        state["pending_count"] = 0
+        return None
 
     if key is None:
         state["pending"] = None
@@ -239,16 +256,21 @@ def update_announcement(prediction, state):
     else:
         state["pending"] = key
         state["pending_count"] = 1
-    if state["pending_count"] < 2:
+    if state["pending_count"] < (2 if uncertain else 1):
         return None
 
-    if key.startswith("next:") and upcoming is not None:
+    if key.startswith("transition:") and upcoming is not None:
         state["target_speed"] = next_speed
         state["current_speed"] = current_speed
         message = upcoming
     else:
         state["current_speed"] = current_speed
-        message = f"Limitation de vitesse à {current_speed} kilomètres heure"
+        message = (
+            f"La limitation passe à {current_speed} kilomètres heure"
+            if not key.startswith("current:unknown")
+            else f"Limitation de vitesse à {current_speed} kilomètres heure"
+        )
+    state["announced"][key] = state["now_ms"]
     state["pending"] = None
     state["pending_count"] = 0
     return message
@@ -293,6 +315,8 @@ def main():
         "target_speed": None,
         "pending": None,
         "pending_count": 0,
+        "announced": {},
+        "now_ms": 0,
     }
     found_match = False
     last_result = None
@@ -302,10 +326,13 @@ def main():
             args.latitude, args.longitude, distance, args.bearing
         )
         prediction = predict(connection, latitude, longitude, args.bearing)
+        announcement_state["now_ms"] = round(
+            distance * 3600 / args.speed_kmh * 1000
+        )
         if prediction is not None:
             found_match = True
-            current, next_speed, distance_to_change = prediction
-            result = (current, next_speed, distance_to_change)
+            current, next_speed, distance_to_change, uncertain = prediction
+            result = (current, next_speed, distance_to_change, uncertain)
             if distance == 0 or result != last_result:
                 if next_speed is None:
                     print(f"{distance:8.0f}  {current:>7}  {'-':>4}  {'-':>21}")
@@ -314,6 +341,8 @@ def main():
                         f"{distance:8.0f}  {current:>7}  {next_speed:>4}  "
                         f"{distance_to_change:21.1f}"
                     )
+                if uncertain:
+                    print("           confidence: uncertain; needs one consistent update")
             spoken_message = update_announcement(prediction, announcement_state)
             if spoken_message:
                 print(f"           voice: {spoken_message}")

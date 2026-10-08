@@ -22,6 +22,7 @@ class RouteSpeedPredictorTest {
         assertEquals(50, prediction?.currentSpeedLimit)
         assertEquals(30, prediction?.nextSpeedLimit)
         assertEquals(194.81, prediction?.distanceToNextSpeedLimitMeters!!, 1.0)
+        assertEquals(false, prediction?.requiresConfirmation)
     }
 
     @Test
@@ -71,6 +72,21 @@ class RouteSpeedPredictorTest {
         assertNull(prediction)
     }
 
+    @Test
+    fun requestsConfirmationWhenAnotherWayIsEquallyPlausible() {
+        val prediction = RouteSpeedPredictor.predict(
+            segments = listOf(
+                segment(1, 50, 0.0, 0.0, 0.0, 0.002, wayId = 10),
+                segment(2, 50, 0.00001, 0.0, 0.00001, 0.002, wayId = 20)
+            ),
+            latitude = 0.000005,
+            longitude = 0.00025,
+            bearing = 90f
+        )
+
+        assertEquals(true, prediction?.requiresConfirmation)
+    }
+
     private fun segment(
         id: Int,
         speed: Int,
@@ -78,9 +94,11 @@ class RouteSpeedPredictorTest {
         startLon: Double,
         endLat: Double,
         endLon: Double,
-        oneway: Int = 0
+        oneway: Int = 0,
+        wayId: Long = id.toLong()
     ) = RoadSegment(
         id = id,
+        wayId = wayId,
         speedLimit = speed,
         oneway = oneway,
         startLatitudeE6 = (startLat * COORDINATE_SCALE).toInt(),

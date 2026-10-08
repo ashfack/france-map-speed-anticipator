@@ -3,8 +3,11 @@ This is an Android app that monitors the vehicle's GPS position and announces de
 
 The local OpenStreetMap database contains roads with explicit speed limits. The app uses the GPS bearing
 while the vehicle is moving to match the current road segment, then follows connected OSM segments in
-their permitted direction to find the next mapped speed-limit change. A limit change must be detected
-consistently on two location updates before it is announced with an approximate distance.
+their permitted direction to find the next mapped speed-limit change. A confident match is announced
+on the first location update; a distant, poorly aligned, or competing-road match must be confirmed
+by a second consistent update. Announcements for the same speed transition are buffered for 30
+seconds without suppressing a different transition. Changes within 25 m use an immediate warning
+instead of a rounded distance announcement.
 
 The bundled database can be regenerated from a Geofabrik PBF extract. Install `pyosmium`, then run:
 

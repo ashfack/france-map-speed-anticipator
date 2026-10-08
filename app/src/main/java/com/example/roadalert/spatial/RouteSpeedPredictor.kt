@@ -7,6 +7,7 @@ import kotlin.math.sin
 
 data class RoadSegment(
     val id: Int,
+    val wayId: Long,
     val speedLimit: Int,
     val oneway: Int,
     val startLatitudeE6: Int,
@@ -18,13 +19,15 @@ data class RoadSegment(
 data class SpeedLimitPrediction(
     val currentSpeedLimit: Int,
     val nextSpeedLimit: Int?,
-    val distanceToNextSpeedLimitMeters: Double?
+    val distanceToNextSpeedLimitMeters: Double?,
+    val requiresConfirmation: Boolean
 )
 
 object RouteSpeedPredictor {
 
     private data class DirectedSegment(
         val id: Int,
+        val wayId: Long,
         val speedLimit: Int,
         val startLatitudeE6: Int,
         val startLongitudeE6: Int,
@@ -84,27 +87,51 @@ object RouteSpeedPredictor {
             if (distance > MAX_ROAD_DISTANCE_METERS) return@mapNotNull null
 
             ProjectedSegment(edge, distance, (1.0 - projection) * length, alignment)
-        }.minByOrNull {
+        }.sortedBy {
             it.distanceFromRoadMeters + (1.0 - it.alignment) * HEADING_SCORE_WEIGHT_METERS
-        } ?: return null
+        }
+        val bestMatch = matched.firstOrNull() ?: return null
+        val competingWay = matched.drop(1).any {
+            it.segment.wayId != bestMatch.segment.wayId &&
+                it.distanceFromRoadMeters + (1.0 - it.alignment) * HEADING_SCORE_WEIGHT_METERS <=
+                bestMatch.distanceFromRoadMeters +
+                (1.0 - bestMatch.alignment) * HEADING_SCORE_WEIGHT_METERS +
+                AMBIGUOUS_MATCH_SCORE_GAP_METERS
+        }
 
-        var distanceAlongRoute = matched.distanceToEndMeters
-        var previous = matched.segment
+        var distanceAlongRoute = bestMatch.distanceToEndMeters
+        var previous = bestMatch.segment
         val visited = mutableSetOf(previous.id to previous.startNode)
-        if (distanceAlongRoute >= MAX_PREDICTION_DISTANCE_METERS) return null
+        val requiresConfirmation = competingWay ||
+            bestMatch.distanceFromRoadMeters > HIGH_CONFIDENCE_MAX_ROAD_DISTANCE_METERS ||
+            bestMatch.alignment < HIGH_CONFIDENCE_MIN_ALIGNMENT
+        if (distanceAlongRoute >= MAX_PREDICTION_DISTANCE_METERS) {
+            return SpeedLimitPrediction(
+                bestMatch.segment.speedLimit,
+                null,
+                null,
+                requiresConfirmation
+            )
+        }
 
         while (distanceAlongRoute < MAX_PREDICTION_DISTANCE_METERS) {
             val successors = adjacency[previous.endNode]
                 .orEmpty()
                 .filter { it.id != previous.id && (it.id to it.startNode) !in visited }
             val next = chooseSuccessor(previous, successors, latitude, longitude, longitudeScale)
-                ?: return SpeedLimitPrediction(matched.segment.speedLimit, null, null)
+                ?: return SpeedLimitPrediction(
+                    bestMatch.segment.speedLimit,
+                    null,
+                    null,
+                    requiresConfirmation
+                )
 
-            if (next.speedLimit != matched.segment.speedLimit) {
+            if (next.speedLimit != bestMatch.segment.speedLimit) {
                 return SpeedLimitPrediction(
-                    currentSpeedLimit = matched.segment.speedLimit,
+                    currentSpeedLimit = bestMatch.segment.speedLimit,
                     nextSpeedLimit = next.speedLimit,
-                    distanceToNextSpeedLimitMeters = distanceAlongRoute
+                    distanceToNextSpeedLimitMeters = distanceAlongRoute,
+                    requiresConfirmation = requiresConfirmation
                 )
             }
 
@@ -115,7 +142,12 @@ object RouteSpeedPredictor {
             visited.add(next.id to next.startNode)
         }
 
-        return SpeedLimitPrediction(matched.segment.speedLimit, null, null)
+        return SpeedLimitPrediction(
+            bestMatch.segment.speedLimit,
+            null,
+            null,
+            requiresConfirmation
+        )
     }
 
     private fun chooseSuccessor(
@@ -159,6 +191,7 @@ object RouteSpeedPredictor {
         if (forward) {
             DirectedSegment(
                 id,
+                wayId,
                 speedLimit,
                 startLatitudeE6,
                 startLongitudeE6,
@@ -168,6 +201,7 @@ object RouteSpeedPredictor {
         } else {
             DirectedSegment(
                 id,
+                wayId,
                 speedLimit,
                 endLatitudeE6,
                 endLongitudeE6,
@@ -200,8 +234,11 @@ object RouteSpeedPredictor {
     private const val COORDINATE_SCALE = 1_000_000.0
     private const val METERS_PER_DEGREE = 111_320.0
     private const val MAX_ROAD_DISTANCE_METERS = 35.0
+    private const val HIGH_CONFIDENCE_MAX_ROAD_DISTANCE_METERS = 12.0
     private const val MAX_PREDICTION_DISTANCE_METERS = 1_500.0
     private const val MIN_HEADING_ALIGNMENT = 0.6427876096865394
+    private const val HIGH_CONFIDENCE_MIN_ALIGNMENT = 0.9063077870366499
+    private const val AMBIGUOUS_MATCH_SCORE_GAP_METERS = 4.0
     private const val MIN_TURN_ALIGNMENT = -0.5
     private const val HEADING_SCORE_WEIGHT_METERS = 20.0
     private const val AMBIGUOUS_BRANCH_ALIGNMENT_GAP = 0.08
