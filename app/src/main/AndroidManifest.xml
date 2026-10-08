@@ -23,7 +23,7 @@
         </activity>
 
         <service
-            android:name=".RoadAlertService"
+            android:name=".service.RoadAlertService"
             android:foregroundServiceType="location"
             android:exported="false" />
     </application>
